@@ -1,1 +1,1 @@
-# NYOS
+# NYOS - NYOS Yields Overall Simplicity
