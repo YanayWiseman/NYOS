@@ -42,3 +42,12 @@ start:
         hlt
         jmp .halt
 
+; Saved BIOS boot drive
+boot_drive: db 0
+
+; Pad everything before the signature to 510 bytes
+times 510 - ($ - $$) db 0
+
+; BIOS boot signature: emits bytes 0x55, 0xAA
+dw 0xAA55
+
