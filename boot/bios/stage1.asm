@@ -44,7 +44,7 @@ start:
     mov bx, 0x8000       ; Destination: ES:BX = 0000:8000
 
     mov ah, 0x02         ; BIOS read-sector service
-    mov al, 1            ; Read one sector
+    mov al, 8            ; Read eight sectors
     mov ch, 0            ; Cylinder zero
     mov cl, 2            ; Sector two, immediately after stage 1
     mov dh, 0            ; Head zero
