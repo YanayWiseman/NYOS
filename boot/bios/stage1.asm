@@ -51,8 +51,9 @@ start:
     mov dl, [boot_drive]
     int 0x13
 
-    jc .disk_error       ; Carry set means the read failed
-    jmp 0x0000:0x8000    ; Execute stage 2
+    jc .disk_error
+    mov dl, [boot_drive]     ; Pass the original boot drive to stage 2
+    jmp 0x0000:0x8000
 
 .disk_error:
     mov ah, 0x0E
