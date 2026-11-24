@@ -84,7 +84,39 @@ stage2_start:
     mov [mmap_count], bp
     mov al, 'M'
     call .putc
+    
+    ; Check that the boot drive supports extended BIOS reads.
+    mov dl, [bios_drive]
+    mov ax, 0x4100
+    mov bx, 0x55AA
+    push ds
+    int 0x13
+    pop ds
+    jc .payload_error
+    cmp bx, 0xAA55
+    jne .payload_error
+    test cx, 1
+    jz .payload_error
+
+    ; Read the ELF slot into low memory.
+    mov dl, [bios_drive]
+    mov si, payload_dap
+    mov ax, 0x4200
+    push ds
+    int 0x13
+    pop ds
+    jc .payload_error
+    cmp word [payload_dap + 2], 64
+    jne .payload_error
+
+    mov al, 'D'
+    call .putc
     jmp .a20_begin
+
+.payload_error:
+    mov al, '!'
+    call .putc
+    jmp .halt
 
 .mmap_error:
     mov word [mmap_count], 0
@@ -266,6 +298,12 @@ section .data
 mmap_count: dw 0
 mmap_calls: dw 0
 bios_drive: db 0
+align 4
+payload_dap:
+    db 0x10, 0         ; Packet size and reserved byte
+    dw 64              ; Number of sectors
+    dw 0x0000, 0x1000  ; Offset, then segment: physical 0x10000
+    dq 9               ; Starting LBA
 
 
 section .note.GNU-stack noalloc noexec nowrite progbits

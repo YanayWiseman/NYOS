@@ -1,21 +1,9 @@
-#include <stddef.h>
+#include "memory.h"
 #include <stdint.h>
+
 
 extern void bios_outb(uint16_t port, uint8_t value);
 extern _Noreturn void bios_halt(void);
-
-/* Matches the 24-byte slots written by our assembly collector. */
-struct e820_entry 
-{
-    uint64_t base;
-    uint64_t length;
-    uint32_t type;
-    uint32_t attributes;
-};
-
-_Static_assert(sizeof(struct e820_entry) == 24, "E820 entries must occupy 24 bytes");
-_Static_assert(offsetof(struct e820_entry, type) == 16, "Unexpected E820 field layout");
-_Static_assert(offsetof(struct e820_entry, attributes) == 20, "Unexpected E820 field layout");
 
 /*
 	Prints a string.
@@ -129,5 +117,40 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     }
 
     debug_puts("Memory-map dump complete\n");
+    if (!memory_init(map, entry_count)) 
+    {
+        debug_puts("Memory allocator initialization failed\n");
+        bios_halt();
+    }
+    
+    /* The ELF slot begins with a four-byte file size. */
+    const volatile uint32_t* slot_size = (const volatile uint32_t*)(uintptr_t)0x10000;
+    const volatile uint8_t* source = (const volatile uint8_t*)(uintptr_t)0x10004;
+    uint32_t size = *slot_size;
+
+    if (size < 4 || size > 64u * 512u - 4u || source[0] != 0x7F || source[1] != 'E' || source[2] != 'L' || source[3] != 'F')
+    {
+        debug_puts("Invalid ELF payload slot\n");
+        bios_halt();
+    }
+
+    uint32_t address = memory_alloc_pages((size + 4095u) / 4096u);
+    if (address == 0)
+    {
+        debug_puts("Cannot allocate ELF buffer\n");
+        bios_halt();
+    }
+
+    uint8_t* destination = (uint8_t*)(uintptr_t)address;
+    for (uint32_t i = 0; i < size; ++i)
+    {
+        destination[i] = source[i];
+    }
+
+    debug_puts("ELF staged: ");
+    debug_dec(size);
+    debug_puts(" bytes at ");
+    debug_hex64(address);
+    debug_puts("\n");
     bios_halt();
 }
