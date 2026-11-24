@@ -5,6 +5,15 @@
 extern void bios_outb(uint16_t port, uint8_t value);
 extern _Noreturn void bios_halt(void);
 
+struct elf64_image
+{
+    uint64_t entry;
+    uint64_t virtual_base;
+    uint32_t physical_base;
+    uint32_t size;
+};
+
+
 /*
 	Prints a string.
 	Input: String pointer.
@@ -73,12 +82,13 @@ static uint64_t read_le64(const uint8_t* p)
     return (uint64_t)read_le32(p) | ((uint64_t)read_le32(p + 4) << 32);
 }
 
+
 /*
-    Checks a static x86-64 ELF.
-    Input: File bytes, size, entry output pointer.
-    Output: Loadable segment count, or zero on failure.
+    Loads a static x86-64 ELF.
+    Input: File bytes, size, image output pointer.
+    Output: Segment count, or zero on failure.
 */
-static uint32_t elf64_validate(const uint8_t* file, uint32_t size, uint64_t* entry_out)
+static uint32_t elf64_load(const uint8_t* file, uint32_t size, struct elf64_image* image)
 {
     enum 
     {
@@ -111,6 +121,8 @@ static uint32_t elf64_validate(const uint8_t* file, uint32_t size, uint64_t* ent
     const uint8_t* ph = file + (uint32_t)phoff;
     uint32_t load_count = 0;
     bool entry_is_executable = false;
+    uint64_t virtual_base = 0;
+    uint64_t last_end = 0;
 
     for (uint32_t i = 0; i < count; ++i, ph += PHDR_SIZE)
     {
@@ -142,6 +154,15 @@ static uint32_t elf64_validate(const uint8_t* file, uint32_t size, uint64_t* ent
         {
             continue;
         }
+        if (load_count == 0)
+        {
+            virtual_base = vaddr & ~UINT64_C(0xFFF);
+        }
+        else if (vaddr < last_end)
+        {
+            return 0; /* Overlapping or out-of-order segments. */
+        }
+        last_end = vaddr + memsz;
 
         ++load_count;
         if ((read_le32(ph + 4) & PF_X) != 0 && entry >= vaddr && entry - vaddr < memsz)
@@ -155,7 +176,56 @@ static uint32_t elf64_validate(const uint8_t* file, uint32_t size, uint64_t* ent
         return 0;
     }
 
-    *entry_out = entry;
+        uint64_t span = last_end - virtual_base;
+    if (span > UINT32_MAX - 4095u)
+    {
+        return 0;
+    }
+
+    uint32_t pages = ((uint32_t)span + 4095u) / 4096u;
+    uint32_t physical_base = memory_alloc_pages(pages);
+    if (physical_base == 0)
+    {
+        return 0;
+    }
+
+    uint32_t image_size = pages * 4096u;
+    uint8_t* target = (uint8_t*)(uintptr_t)physical_base;
+
+    /* Clear the image so BSS and gaps start at zero. */
+    for (uint32_t i = 0; i < image_size; ++i)
+    {
+        target[i] = 0;
+    }
+
+    /* The first pass already validated these headers and ranges. */
+    ph = file + (uint32_t)phoff;
+    for (uint32_t i = 0; i < count; ++i, ph += PHDR_SIZE)
+    {
+        if (read_le32(ph) != PT_LOAD)
+        {
+            continue;
+        }
+
+        uint32_t filesz = (uint32_t)read_le64(ph + 32);
+        if (filesz == 0)
+        {
+            continue;
+        }
+
+        uint32_t offset = (uint32_t)read_le64(ph + 8);
+        uint32_t delta = (uint32_t)(read_le64(ph + 16) - virtual_base);
+
+        for (uint32_t j = 0; j < filesz; ++j)
+        {
+            target[delta + j] = file[offset + j];
+        }
+    }
+
+    image->entry = entry;
+    image->virtual_base = virtual_base;
+    image->physical_base = physical_base;
+    image->size = image_size;
     return load_count;
 }
 
@@ -249,21 +319,30 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     }
 
     debug_puts("ELF staged: ");
-    uint64_t entry;
-    uint32_t segments = elf64_validate(destination, size, &entry);
-    if (segments == 0)
-    {
-        debug_puts("Unsupported or invalid ELF64\n");
-        bios_halt();
-    }
-    debug_puts("ELF64 entry: ");
-    debug_hex64(entry);
-    debug_puts("\nLoadable segments: ");
-    debug_dec(segments);
-    debug_puts("\n");
     debug_dec(size);
     debug_puts(" bytes at ");
     debug_hex64(address);
     debug_puts("\n");
+
+    struct elf64_image image;
+    uint32_t segments = elf64_load(destination, size, &image);
+    if (segments == 0)
+    {
+        debug_puts("ELF64 load failed\n");
+        bios_halt();
+    }
+
+    debug_puts("ELF64 entry: ");
+    debug_hex64(image.entry);
+    debug_puts("\nLoadable segments: ");
+    debug_dec(segments);
+    debug_puts("\nELF64 physical base: ");
+    debug_hex64(image.physical_base);
+    debug_puts("\nELF64 virtual base: ");
+    debug_hex64(image.virtual_base);
+    debug_puts("\nELF64 image bytes: ");
+    debug_dec(image.size);
+    debug_puts("\nELF64 segments loaded\n");
+
     bios_halt();
 }
