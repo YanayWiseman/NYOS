@@ -58,6 +58,107 @@ static void debug_dec(uint32_t value)
     }
 }
 
+static uint16_t read_le16(const uint8_t* p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t read_le32(const uint8_t* p)
+{
+    return (uint32_t)read_le16(p) | ((uint32_t)read_le16(p + 2) << 16);
+}
+
+static uint64_t read_le64(const uint8_t* p)
+{
+    return (uint64_t)read_le32(p) | ((uint64_t)read_le32(p + 4) << 32);
+}
+
+/*
+    Checks a static x86-64 ELF.
+    Input: File bytes, size, entry output pointer.
+    Output: Loadable segment count, or zero on failure.
+*/
+static uint32_t elf64_validate(const uint8_t* file, uint32_t size, uint64_t* entry_out)
+{
+    enum 
+    {
+        EHDR_SIZE = 64, PHDR_SIZE = 56,
+        PT_LOAD = 1, PT_DYNAMIC = 2, PT_INTERP = 3, PF_X = 1
+    };
+
+    /* The disk staging check already verified the ELF magic. */
+    if (size < EHDR_SIZE ||
+        file[4] != 2 || file[5] != 1 || file[6] != 1 ||
+        read_le16(file + 16) != 2 ||  /* ET_EXEC */
+        read_le16(file + 18) != 62 || /* EM_X86_64 */
+        read_le32(file + 20) != 1 ||
+        read_le16(file + 52) != EHDR_SIZE ||
+        read_le16(file + 54) != PHDR_SIZE)
+    {
+        return 0;
+    }
+
+    uint64_t entry = read_le64(file + 24);
+    uint64_t phoff = read_le64(file + 32);
+    uint32_t count = read_le16(file + 56);
+
+    /* Check the table bounds before reading any program headers. */
+    if (count == 0 || phoff < EHDR_SIZE || phoff > size || count * PHDR_SIZE > size - (uint32_t)phoff)
+    {
+        return 0;
+    }
+
+    const uint8_t* ph = file + (uint32_t)phoff;
+    uint32_t load_count = 0;
+    bool entry_is_executable = false;
+
+    for (uint32_t i = 0; i < count; ++i, ph += PHDR_SIZE)
+    {
+        uint32_t type = read_le32(ph);
+        if (type == PT_DYNAMIC || type == PT_INTERP)
+        {
+            return 0;
+        }
+        if (type != PT_LOAD)
+        {
+            continue;
+        }
+
+        uint64_t offset = read_le64(ph + 8);
+        uint64_t vaddr = read_le64(ph + 16);
+        uint64_t filesz = read_le64(ph + 32);
+        uint64_t memsz = read_le64(ph + 40);
+        uint64_t align = read_le64(ph + 48);
+
+        if (filesz > memsz || offset > size || filesz > size - offset || memsz > UINT64_MAX - vaddr)
+        {
+            return 0;
+        }
+        if (align > 1 && ((align & (align - 1)) != 0 || ((vaddr ^ offset) & (align - 1)) != 0))
+        {
+            return 0;
+        }
+        if (memsz == 0)
+        {
+            continue;
+        }
+
+        ++load_count;
+        if ((read_le32(ph + 4) & PF_X) != 0 && entry >= vaddr && entry - vaddr < memsz)
+        {
+            entry_is_executable = true;
+        }
+    }
+
+    if (!entry_is_executable)
+    {
+        return 0;
+    }
+
+    *entry_out = entry;
+    return load_count;
+}
+
 /*
 	Runs the BIOS loader.
 	Input: Map address, entry count, boot drive.
@@ -148,6 +249,18 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     }
 
     debug_puts("ELF staged: ");
+    uint64_t entry;
+    uint32_t segments = elf64_validate(destination, size, &entry);
+    if (segments == 0)
+    {
+        debug_puts("Unsupported or invalid ELF64\n");
+        bios_halt();
+    }
+    debug_puts("ELF64 entry: ");
+    debug_hex64(entry);
+    debug_puts("\nLoadable segments: ");
+    debug_dec(segments);
+    debug_puts("\n");
     debug_dec(size);
     debug_puts(" bytes at ");
     debug_hex64(address);
