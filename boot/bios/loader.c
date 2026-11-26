@@ -229,6 +229,151 @@ static uint32_t elf64_load(const uint8_t* file, uint32_t size, struct elf64_imag
     return load_count;
 }
 
+#define PAGE_SIZE    4096u
+#define PAGE_MASK    UINT64_C(0xFFFFF000)  /* Physical pages below 4 GiB. */
+#define PAGE_PRESENT UINT64_C(1)
+#define PAGE_WRITE   UINT64_C(2)
+#define PAGE_NX      (UINT64_C(1) << 63)
+
+static uint32_t allocate_page_table(void)
+{
+    uint32_t address = memory_alloc_pages(1);
+    if (address != 0)
+    {
+        uint64_t* table = (uint64_t*)(uintptr_t)address;
+        for (uint32_t i = 0; i < 512; ++i)
+        {
+            table[i] = 0;
+        }
+    }
+
+    return address;
+}
+
+/*
+    Walks to a 4 KiB page entry.
+    Input: PML4 address, virtual address, create flag.
+    Output: Page entry pointer, or NULL on failure.
+*/
+static uint64_t* page_entry(uint32_t root, uint64_t address, bool create)
+{
+    /* Check that the address is canonical for four-level paging. */
+    uint64_t high = address >> 47;
+    if (high != 0 && high != 0x1FFFF)
+    {
+        return NULL;
+    }
+
+    uint64_t* table = (uint64_t*)(uintptr_t)root;
+    for (uint32_t shift = 39; shift > 12; shift -= 9)
+    {
+        uint64_t* entry = &table[(address >> shift) & 0x1FF];
+        if ((*entry & PAGE_PRESENT) == 0)
+        {
+            uint32_t next = create ? allocate_page_table() : 0;
+            if (next == 0)
+            {
+                return NULL;
+            }
+
+            *entry = next | PAGE_PRESENT | PAGE_WRITE;
+        }
+
+        table = (uint64_t*)(uintptr_t)(*entry & PAGE_MASK);
+    }
+
+    return &table[(address >> 12) & 0x1FF];
+}
+
+static bool map_page(uint32_t root, uint64_t virt, uint32_t phys, uint64_t flags)
+{
+    uint64_t* slot = page_entry(root, virt, true);
+    uint64_t entry = phys | flags | PAGE_PRESENT;
+
+    if (slot == NULL || (*slot != 0 && *slot != entry))
+    {
+        return false;
+    }
+
+    *slot = entry;
+    return true;
+}
+
+/*
+    Builds the handoff page tables.
+    Input: Validated ELF file and loaded image.
+    Output: PML4 physical address, or zero on failure.
+*/
+static uint32_t build_page_tables(const uint8_t* file, const struct elf64_image* image)
+{
+    uint32_t root = allocate_page_table();
+    if (root == 0)
+    {
+        return 0;
+    }
+
+    /* Identity-map low memory for stage 2, its stack, and VGA text. */
+    for (uint32_t addr = PAGE_SIZE; addr < 0x100000; addr += PAGE_SIZE)
+    {
+        uint64_t flags = PAGE_WRITE;
+        if (addr < 0x8000 || addr >= 0xA000)
+        {
+            flags |= PAGE_NX;
+        }
+
+        if (!map_page(root, addr, addr, flags))
+        {
+            return 0;
+        }
+    }
+
+    /* Reuse the program headers already checked by elf64_load. */
+    const uint8_t* ph = file + (uint32_t)read_le64(file + 32);
+    uint32_t count = read_le16(file + 56);
+
+    for (uint32_t i = 0; i < count; ++i, ph += 56)
+    {
+        if (read_le32(ph) != 1) /* PT_LOAD */
+        {
+            continue;
+        }
+
+        uint64_t size = read_le64(ph + 40);
+        if (size == 0)
+        {
+            continue;
+        }
+
+        uint32_t elf_flags = read_le32(ph + 4);
+        uint64_t flags = (elf_flags & 2) ? PAGE_WRITE : 0; /* PF_W */
+        if ((elf_flags & 1) == 0)                        /* PF_X */
+        {
+            flags |= PAGE_NX;
+        }
+
+        uint64_t start = read_le64(ph + 16);
+        uint64_t page = start & ~UINT64_C(0xFFF);
+        uint64_t last = (start + size - 1) & ~UINT64_C(0xFFF);
+
+        for (;; page += PAGE_SIZE)
+        {
+            uint32_t phys = image->physical_base + (uint32_t)(page - image->virtual_base);
+
+            if (!map_page(root, page, phys, flags))
+            {
+                return 0;
+            }
+            if (page == last)
+            {
+                break;
+            }
+        }
+    }
+
+    return root;
+}
+
+
 /*
 	Runs the BIOS loader.
 	Input: Map address, entry count, boot drive.
@@ -249,7 +394,7 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     debug_puts("\n");
 
     /* Validate the arguments supplied by our assembly startup. */
-    if (map_address != 0x9000 || entry_count == 0 || entry_count > 64 || boot_drive > 0xFF) 
+    if (map_address != 0xA000 || entry_count == 0 || entry_count > 64 || boot_drive > 0xFF) 
     {
         debug_puts("Invalid boot arguments\n");
         bios_halt();
@@ -343,6 +488,27 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     debug_puts("\nELF64 image bytes: ");
     debug_dec(image.size);
     debug_puts("\nELF64 segments loaded\n");
+    
+    uint32_t pml4 = build_page_tables(destination, &image);
+    if (pml4 == 0)
+    {
+        debug_puts("Page table build failed\n");
+        bios_halt();
+    }
 
+    uint64_t* entry = page_entry(pml4, image.entry, false);
+    uint32_t expected = image.physical_base + (uint32_t)(image.entry - image.virtual_base);
+
+    if (entry == NULL || (*entry & (PAGE_PRESENT | PAGE_NX)) != PAGE_PRESENT || (*entry & PAGE_MASK) != (expected & ~0xFFFu))
+    {
+        debug_puts("Entry mapping check failed\n");
+        bios_halt();
+    }
+
+    debug_puts("PML4 at ");
+    debug_hex64(pml4);
+    debug_puts("\nEntry maps to ");
+    debug_hex64(expected);
+    debug_puts("\nPaging tables verified\n");
     bios_halt();
 }

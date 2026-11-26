@@ -45,4 +45,4 @@ SECTIONS
 
 ASSERT(stage2_start == 0x8000, "Stage 2 must start at 0x8000")
 
-ASSERT(__bss_end <= 0x9000, "Stage 2 exceeds its 4 KiB allocation")
+ASSERT(__bss_end <= 0xA000, "Stage 2 exceeds its 8 KiB allocation")

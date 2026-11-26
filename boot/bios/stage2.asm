@@ -7,7 +7,7 @@ extern bios_main
 extern __bss_start
 extern __bss_end
 
-MAP_BUFFER   equ 0x9000
+MAP_BUFFER   equ 0xA000
 MAP_CAPACITY equ 64
 CODE_SEL     equ 0x08
 DATA_SEL     equ 0x10
@@ -303,7 +303,7 @@ payload_dap:
     db 0x10, 0         ; Packet size and reserved byte
     dw 64              ; Number of sectors
     dw 0x0000, 0x1000  ; Offset, then segment: physical 0x10000
-    dq 9               ; Starting LBA
+    dq 17              ; Starting LBA
 
 
 section .note.GNU-stack noalloc noexec nowrite progbits
