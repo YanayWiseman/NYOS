@@ -38,20 +38,29 @@ start:
     mov al, 'S'
     int 0x10
 
-    ; Load stage 2 at physical address 0x8000
-    xor ax, ax
-    mov es, ax
-    mov bx, 0x8000       ; Destination: ES:BX = 0000:8000
-
-    mov ah, 0x02         ; BIOS read-sector service
-    mov al, 16           ; Read sixteen sectors
-    mov ch, 0            ; Cylinder zero
-    mov cl, 2            ; Sector two, immediately after stage 1
-    mov dh, 0            ; Head zero
+    ; Check for extended BIOS disk access.
     mov dl, [boot_drive]
+    mov ax, 0x4100
+    mov bx, 0x55AA
+    push ds
     int 0x13
-
+    pop ds
     jc .disk_error
+    cmp bx, 0xAA55
+    jne .disk_error
+    test cx, 1
+    jz .disk_error
+
+    ; Load the 16 KiB stage-2 slot at physical address 0x8000.
+    mov dl, [boot_drive]
+    mov si, stage2_dap
+    mov ax, 0x4200
+    push ds
+    int 0x13
+    pop ds
+    jc .disk_error
+    cmp word [stage2_dap + 2], 32
+    jne .disk_error
     mov dl, [boot_drive]     ; Pass the original boot drive to stage 2
     jmp 0x0000:0x8000
 
@@ -69,6 +78,13 @@ start:
 
 ; Saved BIOS boot drive
 boot_drive: db 0
+
+align 4
+stage2_dap:
+    db 0x10, 0
+    dw 32
+    dw 0x8000, 0
+    dq 1
 
 ; Pad everything before the signature to 510 bytes
 times 510 - ($ - $$) db 0

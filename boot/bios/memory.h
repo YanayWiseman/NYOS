@@ -20,4 +20,14 @@ _Static_assert(offsetof(struct e820_entry, attributes) == 20, "Unexpected E820 a
 bool memory_init(const struct e820_entry* map, uint32_t count);
 uint32_t memory_alloc_pages(uint32_t pages);
 
+#define MEMORY_MAX_ALLOCATIONS 64
+
+struct memory_allocation
+{
+    uint32_t base;
+    uint32_t length;
+};
+
+const struct memory_allocation* memory_allocations(uint32_t* count);
+
 #endif

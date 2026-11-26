@@ -1,18 +1,9 @@
-#include "memory.h"
+#include "limine.h"
 #include <stdint.h>
 
-extern void bios_enter_long_mode(uint32_t pml4, uint64_t entry);
+extern void bios_enter_long_mode(uint32_t pml4, uint64_t entry, uint64_t stack_top);
 extern void bios_outb(uint16_t port, uint8_t value);
 extern _Noreturn void bios_halt(void);
-
-struct elf64_image
-{
-    uint64_t entry;
-    uint64_t virtual_base;
-    uint32_t physical_base;
-    uint32_t size;
-};
-
 
 /*
 	Prints a string.
@@ -285,7 +276,7 @@ static uint64_t* page_entry(uint32_t root, uint64_t address, bool create)
     return &table[(address >> 12) & 0x1FF];
 }
 
-static bool map_page(uint32_t root, uint64_t virt, uint32_t phys, uint64_t flags)
+bool bios_map_page(uint32_t root, uint64_t virt, uint32_t phys, uint64_t flags)
 {
     uint64_t* slot = page_entry(root, virt, true);
     uint64_t entry = phys | flags | PAGE_PRESENT;
@@ -316,12 +307,12 @@ static uint32_t build_page_tables(const uint8_t* file, const struct elf64_image*
     for (uint32_t addr = PAGE_SIZE; addr < 0x100000; addr += PAGE_SIZE)
     {
         uint64_t flags = PAGE_WRITE;
-        if (addr < 0x8000 || addr >= 0xA000)
+        if (addr < 0x8000 || addr >= 0xC000)
         {
             flags |= PAGE_NX;
         }
 
-        if (!map_page(root, addr, addr, flags))
+        if (!bios_map_page(root, addr, addr, flags))
         {
             return 0;
         }
@@ -359,7 +350,7 @@ static uint32_t build_page_tables(const uint8_t* file, const struct elf64_image*
         {
             uint32_t phys = image->physical_base + (uint32_t)(page - image->virtual_base);
 
-            if (!map_page(root, page, phys, flags))
+            if (!bios_map_page(root, page, phys, flags))
             {
                 return 0;
             }
@@ -394,7 +385,7 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     debug_puts("\n");
 
     /* Validate the arguments supplied by our assembly startup. */
-    if (map_address != 0xA000 || entry_count == 0 || entry_count > 64 || boot_drive > 0xFF) 
+    if (map_address != 0xC000 || entry_count == 0 || entry_count > 64 || boot_drive > 0xFF)
     {
         debug_puts("Invalid boot arguments\n");
         bios_halt();
@@ -510,7 +501,19 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     debug_puts("\nEntry maps to ");
     debug_hex64(expected);
     debug_puts("\nPaging tables verified\n");
-    bios_enter_long_mode(pml4, image.entry);
+    uint64_t stack_top = 0;
+    enum limine_result handoff = limine_prepare(&image, map, entry_count, pml4,
+                                               &stack_top);
+    if (handoff == LIMINE_INVALID)
+    {
+        debug_puts("Limine handoff rejected\n");
+        bios_halt();
+    }
+    if (handoff == LIMINE_READY)
+    {
+        debug_puts("Limine base 3 handoff ready\n");
+    }
+    bios_enter_long_mode(pml4, image.entry, stack_top);
 
     debug_puts("CPU lacks long mode, NX, or required CPU features\n");
     bios_halt();

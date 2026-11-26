@@ -7,11 +7,13 @@ extern bios_main
 extern __bss_start
 extern __bss_end
 
-MAP_BUFFER   equ 0xA000
+MAP_BUFFER   equ 0xC000
 MAP_CAPACITY equ 64
-CODE_SEL     equ 0x08
-DATA_SEL     equ 0x10
-CODE64_SEL   equ 0x18
+CODE_SEL     equ 0x18
+DATA_SEL     equ 0x20
+CODE64_SEL   equ 0x28
+DATA64_SEL   equ 0x30
+HHDM_OFFSET  equ 0xFFFF800000000000
 
 stage2_start:
     cli
@@ -279,7 +281,7 @@ bios_outb:
     out dx, al
     ret
 
-; void bios_enter_long_mode(uint32_t pml4, uint64_t entry)
+; void bios_enter_long_mode(uint32_t pml4, uint64_t entry, uint64_t stack_top)
 ; Returns only if the CPU lacks a required feature.
 global bios_enter_long_mode
 bios_enter_long_mode:
@@ -323,6 +325,25 @@ bios_enter_long_mode:
     pop ebx
 
     cli
+    mov eax, [esp + 16]
+    or eax, [esp + 20]
+    jz .enable_paging               ; Plain ELF probes use the legacy path
+    mov al, 0xFF
+    out 0x21, al
+    out 0xA1, al
+
+    mov eax, 1
+    cpuid
+    test edx, 1 << 16               ; PAT
+    jz .enable_paging
+    wbinvd
+    mov ecx, 0x277                 ; IA32_PAT
+    mov eax, 0x00070406             ; WB, WT, UC-, UC
+    mov edx, 0x00000105             ; WP, WC, UC, UC
+    wrmsr
+    wbinvd
+
+.enable_paging:
     mov eax, cr4
     and eax, ~(1 << 12)              ; Use four levels of paging
     or eax, 1 << 5                   ; CR4.PAE
@@ -348,19 +369,73 @@ bios_enter_long_mode:
 
 [bits 64]
 .entry64:
-    mov ax, DATA_SEL
+    mov ax, DATA64_SEL
     mov ds, ax
     mov es, ax
     mov ss, ax
 
     mov esp, esp                    ; Zero the upper half of RSP
     mov rax, [rsp + 8]               ; Full 64-bit ELF entry address
+    mov r8, [rsp + 16]               ; Dedicated Limine stack, or zero
+    test r8, r8
+    jnz .limine_entry
     and rsp, -16
     sub rsp, 8
     mov qword [rsp], 0               ; Set function-entry stack alignment
     xor ebp, ebp
     cld
     jmp rax
+
+.limine_entry:
+    mov rsi, rax                    ; Keep entry across WRMSR
+    mov ax, DATA64_SEL
+    mov fs, ax
+    mov gs, ax
+    xor eax, eax
+    xor edx, edx
+    mov ecx, 0xC0000100             ; IA32_FS_BASE
+    wrmsr
+    inc ecx                        ; IA32_GS_BASE
+    wrmsr
+
+    mov r9, HHDM_OFFSET
+    lea rdx, [rel .higher_half]
+    add rdx, r9
+    jmp rdx
+
+.higher_half:
+    ; Move the GDT to its direct-map address before removing low mappings.
+    sub rsp, 16
+    mov word [rsp], gdt_end - gdt_start - 1
+    lea rdx, [rel gdt_start]
+    mov [rsp + 2], rdx
+    lgdt [rsp]
+
+    mov rsp, r8
+    push qword 0
+    mov [rsp - 8], rsi
+
+    mov rcx, cr3
+    mov qword [r9 + rcx], 0        ; Drop the temporary identity map
+    mov cr3, rcx
+
+    xor eax, eax
+    xor ebx, ebx
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor ebp, ebp
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    cld
+    jmp qword [rsp - 8]
 
 [bits 32]
 
@@ -370,9 +445,12 @@ align 8
 
 gdt_start:
     dq 0x0000000000000000   ; Null descriptor
+    dq 0x00009A000000FFFF   ; Flat 16-bit code segment
+    dq 0x000092000000FFFF   ; Flat writable 16-bit data segment
     dq 0x00CF9A000000FFFF   ; Flat 32-bit code segment
     dq 0x00CF92000000FFFF   ; Flat writable data segment
     dq 0x00AF9A000000FFFF   ; 64-bit code segment
+    dq 0x00CF92000000FFFF   ; Writable data segment for long mode
 gdt_end:
 
 gdt_descriptor:
@@ -390,7 +468,7 @@ payload_dap:
     db 0x10, 0         ; Packet size and reserved byte
     dw 64              ; Number of sectors
     dw 0x0000, 0x1000  ; Offset, then segment: physical 0x10000
-    dq 17              ; Starting LBA
+    dq 33              ; Starting LBA
 
 
 section .note.GNU-stack noalloc noexec nowrite progbits

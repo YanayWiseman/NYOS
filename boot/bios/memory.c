@@ -7,6 +7,14 @@
 static const struct e820_entry *memory_map;
 static uint32_t memory_map_count;
 static uint64_t next_address;
+static struct memory_allocation allocations[MEMORY_MAX_ALLOCATIONS];
+static uint32_t allocation_count;
+
+const struct memory_allocation* memory_allocations(uint32_t* count)
+{
+    *count = allocation_count;
+    return allocations;
+}
 
 
 /*
@@ -157,6 +165,20 @@ uint32_t memory_alloc_pages(uint32_t pages)
         return 0;
     }
 
+    if (allocation_count != 0 && best_address == next_address)
+    {
+        allocations[allocation_count - 1].length += (uint32_t)bytes;
+    }
+    else
+    {
+        if (allocation_count == MEMORY_MAX_ALLOCATIONS)
+        {
+            return 0;
+        }
+        allocations[allocation_count++] = (struct memory_allocation) {
+            (uint32_t)best_address, (uint32_t)bytes
+        };
+    }
     next_address = best_address + bytes;
     return (uint32_t)best_address;
 }
