@@ -1,7 +1,7 @@
 #include "memory.h"
 #include <stdint.h>
 
-
+extern void bios_enter_long_mode(uint32_t pml4, uint64_t entry);
 extern void bios_outb(uint16_t port, uint8_t value);
 extern _Noreturn void bios_halt(void);
 
@@ -510,5 +510,8 @@ _Noreturn void bios_main(uint32_t map_address, uint32_t entry_count, uint32_t bo
     debug_puts("\nEntry maps to ");
     debug_hex64(expected);
     debug_puts("\nPaging tables verified\n");
+    bios_enter_long_mode(pml4, image.entry);
+
+    debug_puts("CPU lacks long mode, NX, or required CPU features\n");
     bios_halt();
 }

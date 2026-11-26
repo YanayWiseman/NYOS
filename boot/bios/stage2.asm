@@ -11,6 +11,7 @@ MAP_BUFFER   equ 0xA000
 MAP_CAPACITY equ 64
 CODE_SEL     equ 0x08
 DATA_SEL     equ 0x10
+CODE64_SEL   equ 0x18
 
 stage2_start:
     cli
@@ -278,6 +279,91 @@ bios_outb:
     out dx, al
     ret
 
+; void bios_enter_long_mode(uint32_t pml4, uint64_t entry)
+; Returns only if the CPU lacks a required feature.
+global bios_enter_long_mode
+bios_enter_long_mode:
+    ; Check whether the EFLAGS ID bit can be changed (CPUID available).
+    pushfd
+    pop eax
+    mov ecx, eax
+    xor eax, 1 << 21
+    push eax
+    popfd
+    pushfd
+    pop eax
+    push ecx
+    popfd
+    xor eax, ecx
+    test eax, 1 << 21
+    jz .unsupported
+
+    push ebx
+    xor eax, eax
+    cpuid
+    cmp eax, 1
+    jb .restore_ebx
+
+    mov eax, 1
+    cpuid
+    and edx, (1 << 5) | (1 << 6)     ; MSR and PAE
+    cmp edx, (1 << 5) | (1 << 6)
+    jne .restore_ebx
+
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb .restore_ebx
+
+    mov eax, 0x80000001
+    cpuid
+    and edx, (1 << 29) | (1 << 20)   ; Long mode and NX
+    cmp edx, (1 << 29) | (1 << 20)
+    jne .restore_ebx
+    pop ebx
+
+    cli
+    mov eax, cr4
+    and eax, ~(1 << 12)              ; Use four levels of paging
+    or eax, 1 << 5                   ; CR4.PAE
+    mov cr4, eax
+
+    mov eax, [esp + 4]               ; Physical address of the PML4
+    mov cr3, eax
+
+    mov ecx, 0xC0000080              ; IA32_EFER
+    rdmsr
+    or eax, (1 << 8) | (1 << 11)     ; LME and NXE
+    wrmsr
+
+    mov eax, cr0
+    or eax, (1 << 31) | (1 << 16)    ; Paging and write protection
+    mov cr0, eax
+    jmp CODE64_SEL:.entry64
+
+.restore_ebx:
+    pop ebx
+.unsupported:
+    ret
+
+[bits 64]
+.entry64:
+    mov ax, DATA_SEL
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
+    mov esp, esp                    ; Zero the upper half of RSP
+    mov rax, [rsp + 8]               ; Full 64-bit ELF entry address
+    and rsp, -16
+    sub rsp, 8
+    mov qword [rsp], 0               ; Set function-entry stack alignment
+    xor ebp, ebp
+    cld
+    jmp rax
+
+[bits 32]
+
 
 section .rodata
 align 8
@@ -286,6 +372,7 @@ gdt_start:
     dq 0x0000000000000000   ; Null descriptor
     dq 0x00CF9A000000FFFF   ; Flat 32-bit code segment
     dq 0x00CF92000000FFFF   ; Flat writable data segment
+    dq 0x00AF9A000000FFFF   ; 64-bit code segment
 gdt_end:
 
 gdt_descriptor:
