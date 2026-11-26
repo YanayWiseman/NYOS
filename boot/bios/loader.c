@@ -146,13 +146,13 @@ static uint32_t elf64_load(const uint8_t* file, uint32_t size, struct elf64_imag
         {
             return 0;
         }
-        if (align > 1 && ((align & (align - 1)) != 0 || ((vaddr ^ offset) & (align - 1)) != 0))
-        {
-            return 0;
-        }
         if (memsz == 0)
         {
             continue;
+        }
+        if (align > 1 && ((align & (align - 1)) != 0 || ((vaddr ^ offset) & (align - 1)) != 0))
+        {
+            return 0;
         }
         if (load_count == 0)
         {
